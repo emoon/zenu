@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 smallvec = "1.13"
+bitflags = "2.6.0"

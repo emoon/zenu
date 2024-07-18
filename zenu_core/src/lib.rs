@@ -1,4 +1,4 @@
-
+use bitflags::bitflags;
 use core::cell::{UnsafeCell, RefCell};
 use smallvec::SmallVec;
 
@@ -10,6 +10,18 @@ static BOX_FLAG_ALLOW_OVERFLOW_X: u32 = 1 << 23;
 //static BOX_FLAG_ALLOW_OVERFLOW_Y: u32 = 1 << 24;
 //static BOX_FLAG_ANIMATE_X: u32 = 1 << 25;
 //static BOX_FLAG_ANIMATE_Y: u32 = 1 << 26;
+
+bitflags! {
+    struct StackFlags : u32 {
+        const OWNER = 1 << 1;
+        const PREF_WIDTH = 1 << 2;
+        const PREF_HEIGHT = 1 << 2;
+        const FIXED_WIDTH = 1 << 3;
+        const FIXED_HEIGHT = 1 << 4;
+        const FLAGS = 1 << 5;
+        const CHILD_LAYOUT_AXIS = 1 << 6;
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct Rect {
@@ -125,7 +137,7 @@ enum SizeKind {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct Size {
+pub struct Size {
     kind: SizeKind,
     value: f32,
     strictness: f32,
@@ -211,13 +223,13 @@ struct FontMetrics {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-enum Axis {
+pub enum Axis {
     #[default]
     Horizontal,
     Vertical,
 }
 
-pub fn do_layout_axis(root: &BoxArea, boxes: &[BoxArea], axis: usize) {
+pub fn do_layout_axis(root: &BoxArea, boxes: &[BoxArea]) {
     do_layout_for(root, boxes, 0);
     do_layout_for(root, boxes, 1);
 }
@@ -262,13 +274,11 @@ fn solve_independent_sizes_for(root: &BoxArea, boxes: &[BoxArea], axis: usize) {
         _ => {}
     }
 
-    // recurse
     let mut node = root.first(boxes);
     while let Some(p) = node {
         solve_independent_sizes_for(p, boxes, axis);
         node = p.next(boxes);
     }
-
 }
 
 fn solve_upward_dependent_sizes_for(root: &BoxArea, boxes: &[BoxArea], axis: usize) {
@@ -355,8 +365,6 @@ fn solve_size_violations(root: &BoxArea, boxes: &[BoxArea], axis: usize) {
     }
 
     if !inner.is_overflowing_on(axis as u32) {
-        let mut node = root.first;
-
         for p in &non_floating_children {
             let pi = p.inner_borrow(); 
 
@@ -442,7 +450,7 @@ impl Paint {
     }
 }
 
-struct Layout {
+pub struct Layout {
     // TODO: Arena
     owner: Vec<usize>,
     pref_width: Vec<Size>,
@@ -452,8 +460,115 @@ struct Layout {
     flags: Vec<u32>,
     child_layout_axis: Vec<Axis>,
     root: usize,
-    current_parent: Option<usize>,
     boxes: Vec<BoxArea>,
+}
+
+pub struct LayoutScope<'a> {
+    layout: &'a mut Layout,
+    used_stacks: StackFlags,
+}
+
+impl<'a> LayoutScope<'a> {
+    pub fn new(layout: &'a mut Layout) -> Self {
+        Self {
+            layout,
+            used_stacks: StackFlags::empty(),
+        }
+    }
+
+    pub fn set_pref_width(&mut self, size: Size) -> &mut Self {
+        self.layout.pref_width.push(size);
+        self.used_stacks |= StackFlags::PREF_WIDTH;
+        self
+    }
+
+    pub fn set_pref_height(&mut self, size: Size) {
+        self.layout.pref_height.push(size);
+        self.used_stacks |= StackFlags::PREF_HEIGHT;
+    }
+
+    pub fn set_fixed_x(&mut self, value: f32) {
+        self.layout.fixed_x.push(value);
+        self.used_stacks |= StackFlags::FIXED_WIDTH;
+    }
+
+    pub fn set_fixed_y(&mut self, value: f32) {
+        self.layout.fixed_y.push(value);
+        self.used_stacks |= StackFlags::FIXED_HEIGHT;
+    }
+
+    pub fn set_flags(&mut self, flags: u32) {
+        self.layout.flags.push(flags);
+        self.used_stacks |= StackFlags::FLAGS;
+    }
+
+    pub fn set_child_layout_axis(&mut self, axis: Axis) {
+        self.layout.child_layout_axis.push(axis);
+        self.used_stacks |= StackFlags::CHILD_LAYOUT_AXIS;
+    }
+
+    pub fn end_box(&mut self) {
+        self.used_stacks = StackFlags::empty();
+    }
+}
+
+impl<'a> Drop for LayoutScope<'a> {
+    fn drop(&mut self) {
+        if self.used_stacks.contains(StackFlags::PREF_WIDTH) {
+            self.layout.pref_width.pop();
+        }
+
+        if self.used_stacks.contains(StackFlags::PREF_HEIGHT) {
+            self.layout.pref_height.pop();
+        }
+
+        if self.used_stacks.contains(StackFlags::FIXED_WIDTH) {
+            self.layout.fixed_x.pop();
+        }
+
+        if self.used_stacks.contains(StackFlags::FIXED_HEIGHT) {
+            self.layout.fixed_y.pop();
+        }
+
+        if self.used_stacks.contains(StackFlags::FLAGS) {
+            self.layout.flags.pop();
+        }
+
+        if self.used_stacks.contains(StackFlags::CHILD_LAYOUT_AXIS) {
+            self.layout.child_layout_axis.pop();
+        }
+    }
+}
+
+fn test() {
+    let mut layout = Layout::new();
+
+    /*
+    thing.with(|t| {
+        t.set_a(0)
+         .set_b(1)
+         .build();
+
+        println!("Hello");
+    });
+
+    thing.with()
+         .set_a(0)
+         .set_b(1)
+         .build(|| {
+        println!("Hello");
+    });
+    */
+
+
+    /*
+    layout.with_fixed_horizontal(500.0, || {
+        if ui.button("Test") {
+            prinln!("Test");
+        }
+    });
+    */
+
 }
 
 impl Layout {
@@ -466,7 +581,7 @@ impl Layout {
             flags: Vec::new(),
             child_layout_axis: Vec::new(),
             root: 0,
-            current_parent: None,
+            //current_parent: None,
             boxes: Vec::new(),
             owner: Vec::new(),
         }
@@ -542,42 +657,8 @@ impl Layout {
 mod tests {
     use super::*;
 
-    /* 
-    #[test]
-    fn test_linking() {
-        let mut layout = Layout::new();
-        layout.pref_width.push(Size::in_pixels(100.0));
-        layout.pref_height.push(Size::in_pixels(100.0));
-        layout.fixed_x.push(0.0);
-        layout.fixed_y.push(0.0);
-        layout.flags.push(0);
-        layout.child_layout_axis.push(Axis::Horizontal);
-
-        layout.create_root();
-        layout.create_box();
-        layout.create_box();
-        layout.create_box();
-
-        let mut count = 0;
-        let mut node = Some(&layout.boxes[0]);
-
-        while let Some(p) = node {
-            node = p.next(&layout.boxes);
-            count += 1;
-        }
-
-        assert_eq!(count, 3);
-    }
-    */
-
     fn count_recursive(node: &BoxArea, boxes: &[BoxArea], count: &mut usize, level: usize) {
         let inner = node.inner_borrow();
-
-        for _ in 0..level {
-            print!("  ");
-        }
-
-        println!("name {}", inner.display_string);
 
         *count += 1;
         
